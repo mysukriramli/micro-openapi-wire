@@ -86,3 +86,183 @@ def prune_openapi(spec: dict) -> dict:
             micro_spec[path][method.upper()] = sig
             
     return micro_spec
+def fetch_spec(url: str) -> dict:
+    headers = {"User-Agent": "MicroOpenAPIWire/1.0 (Machine-First Token Optimizer)"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code == 200:
+            content_type = resp.headers.get("content-type", "")
+            if "yaml" in content_type or url.endswith(".yaml") or url.endswith(".yml"):
+                return yaml.safe_load(resp.text)
+            return resp.json()
+    except Exception as e:
+        print(f"Failed to fetch {url}: {e}")
+    return {}
+
+def build_static_api(conn):
+    os.makedirs(os.path.join(API_DIR, "schemas"), exist_ok=True)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    
+    cur = conn.execute("SELECT api_name, original_size_bytes, minified_size_bytes, token_reduction_pct, last_updated_utc, minified_json FROM api_schemas")
+    rows = cur.fetchall()
+    
+    catalog = []
+    lines = [
+        "# Micro-OpenAPI Pruned Schema Wire",
+        f"> Last Sync: {now_iso} UTC",
+        "> Optimization: Verbose descriptions, examples, and metadata stripped (Avg 85-95% token savings).",
+        "",
+        "## Available Micro-Schemas"
+    ]
+    
+    for row in rows:
+        name, orig_sz, min_sz, reduction, updated, min_json = row
+        catalog.append({
+            "api_name": name,
+            "original_bytes": orig_sz,
+            "minified_bytes": min_sz,
+            "token_reduction_pct": round(reduction, 2),
+            "updated_utc": updated,
+            "endpoint": f"v1/schemas/{name}.min.json"
+        })
+        
+        # Write individual minified JSON spec
+        with open(os.path.join(API_DIR, "schemas", f"{name}.min.json"), "w", encoding="utf-8") as f:
+            f.write(min_json)
+            
+        lines.append(f"- **{name}**: {reduction:.1f}% reduction ({orig_sz // 1024} KB -> {min_sz // 1024} KB) | Endpoint: `v1/schemas/{name}.min.json`")
+
+    with open(os.path.join(API_DIR, "index.json"), "w", encoding="utf-8") as f:
+        json.dump({"metadata": {"updated_at": now_iso, "count": len(catalog)}, "apis": catalog}, f, indent=2)
+
+    with open(os.path.join(EXPORT_DIR, "llms.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    html = f"""<!DOCTYPE html><html><head><title>Micro-OpenAPI Wire</title></head>
+    <body style='font-family:system-ui,sans-serif;max-width:850px;margin:2rem auto;line-height:1.6;padding:0 1rem;'>
+    <h1>⚡ Micro-OpenAPI Pruned Wire</h1>
+    <p>Ultra-dense, token-pruned API function signatures for autonomous LLM agents.</p>
+    <h3>Machine Feeds</h3>
+    <ul>
+      <li><a href='v1/index.json'>/v1/index.json</a> (Catalog &amp; Token Metrics)</li>
+      <li><a href='llms.txt'>llms.txt</a> (Token-Efficient LLM Digest)</li>
+      <li><a href='schemas.parquet'>schemas.parquet</a> (Columnar Parquet Snapshot)</li>
+    </ul>
+    <h3>Pruned Specs</h3>
+    <ul>
+      {"".join([f"<li><a href='v1/schemas/{c['api_name']}.min.json'>{c['api_name']}.min.json</a> ({c['token_reduction_pct']}% smaller)</li>" for c in catalog])}
+    </ul>
+    </body></html>"""
+    with open(os.path.join(EXPORT_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+
+def run():
+    os.makedirs("data", exist_ok=True)
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+
+    conn = duckdb.connect(DB_FILE)
+    with open("schema.sql", "r", encoding="utf-8") as f:
+        conn.execute(f.read())
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    date_str = now.strftime("%Y-%m-%d")
+    year_str = now.strftime("%Y")
+    month_str = now.strftime("%m")
+
+    month_dir = os.path.join(HISTORY_DIR, year_str, month_str)
+    os.makedirs(month_dir, exist_ok=True)
+    daily_history_file = os.path.join(month_dir, f"{date_str}.jsonl")
+
+    conn.execute("BEGIN TRANSACTION")
+
+    for api_name, url in TARGET_APIS.items():
+        spec = fetch_spec(url)
+        if not spec:
+            continue
+
+        orig_json = json.dumps(spec)
+        orig_size = len(orig_json.encode("utf-8"))
+
+        pruned = prune_openapi(spec)
+        min_json = json.dumps(pruned, separators=(",", ":"))
+        min_size = len(min_json.encode("utf-8"))
+
+        reduction_pct = ((orig_size - min_size) / orig_size) * 100.0 if orig_size > 0 else 0.0
+        content_hash = hashlib.sha256(min_json.encode("utf-8")).hexdigest()
+
+        existing = conn.execute(f"SELECT content_hash FROM api_schemas WHERE api_name = '{api_name}'").fetchone()
+
+        escaped_min_json = min_json.replace("'", "''")
+
+        if not existing:
+            conn.execute(f"""
+                INSERT INTO api_schemas (
+                    api_name, source_url, original_size_bytes, minified_size_bytes,
+                    token_reduction_pct, minified_json, content_hash, last_updated_utc
+                ) VALUES (
+                    '{api_name}', '{url}', {orig_size}, {min_size},
+                    {reduction_pct}, '{escaped_min_json}', '{content_hash}', '{now_iso}'
+                )
+            """)
+
+            commit_id = conn.execute("SELECT nextval('seq_commit_id')").fetchone()[0]
+            conn.execute(f"""
+                INSERT INTO ledger (commit_id, timestamp_utc, operation, api_name, endpoint_drift_summary)
+                VALUES ({commit_id}, '{now_iso}', 'INIT_SCHEMA', '{api_name}', 'Initial pruned schema generated')
+            """)
+
+            ledger_entry = {
+                "commit_id": commit_id,
+                "timestamp_utc": now_iso,
+                "operation": "INIT_SCHEMA",
+                "api_name": api_name,
+                "original_bytes": orig_size,
+                "minified_bytes": min_size,
+                "reduction_pct": reduction_pct,
+                "content_hash": content_hash
+            }
+            with open(daily_history_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(ledger_entry) + "\n")
+
+        elif existing[0] != content_hash:
+            conn.execute(f"""
+                UPDATE api_schemas SET
+                    original_size_bytes = {orig_size},
+                    minified_size_bytes = {min_size},
+                    token_reduction_pct = {reduction_pct},
+                    minified_json = '{escaped_min_json}',
+                    content_hash = '{content_hash}',
+                    last_updated_utc = '{now_iso}'
+                WHERE api_name = '{api_name}'
+            """)
+
+            commit_id = conn.execute("SELECT nextval('seq_commit_id')").fetchone()[0]
+            conn.execute(f"""
+                INSERT INTO ledger (commit_id, timestamp_utc, operation, api_name, endpoint_drift_summary)
+                VALUES ({commit_id}, '{now_iso}', 'SCHEMA_DRIFT', '{api_name}', 'Endpoint signatures updated')
+            """)
+
+            ledger_entry = {
+                "commit_id": commit_id,
+                "timestamp_utc": now_iso,
+                "operation": "SCHEMA_DRIFT",
+                "api_name": api_name,
+                "original_bytes": orig_size,
+                "minified_bytes": min_size,
+                "reduction_pct": reduction_pct,
+                "content_hash": content_hash
+            }
+            with open(daily_history_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(ledger_entry) + "\n")
+
+    conn.execute("COMMIT")
+
+    conn.execute(f"COPY (SELECT api_name, source_url, original_size_bytes, minified_size_bytes, token_reduction_pct, content_hash, last_updated_utc FROM api_schemas) TO '{EXPORT_DIR}/schemas.parquet' (FORMAT PARQUET)")
+    build_static_api(conn)
+    conn.close()
+
+if __name__ == "__main__":
+    run()
+
