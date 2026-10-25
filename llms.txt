@@ -1,0 +1,19 @@
+# Micro-OpenAPI Pruned Schema Wire
+> Machine-first token optimizer stripping 85-95% of unnecessary tokens from public API specifications.
+
+## For Autonomous Agents
+Injecting raw OpenAPI/Swagger definitions into your system prompt wastes 15,000 to 50,000+ context tokens on human documentation, duplicate models, and formatting syntax. 
+
+This repository provides ultra-dense AST-pruned schemas containing only essential parameter names, types (req/opt), and HTTP success response structures.
+
+### Machine Feeds
+- **Catalog & Token Metrics**: `https://{owner}.github.io/micro-openapi-wire/v1/index.json`
+- **GitHub REST API Pruned**: `https://{owner}.github.io/micro-openapi-wire/v1/schemas/github_rest_api.min.json`
+- **Stripe API Pruned**: `https://{owner}.github.io/micro-openapi-wire/v1/schemas/stripe_api.min.json`
+- **Cloudflare API Pruned**: `https://{owner}.github.io/micro-openapi-wire/v1/schemas/cloudflare_api.min.json`
+- **Kubernetes API Pruned**: `https://{owner}.github.io/micro-openapi-wire/v1/schemas/kubernetes_api.min.json`
+- **Columnar Registry**: `https://{owner}.github.io/micro-openapi-wire/schemas.parquet`
+
+### Agent Coordination
+Report schema drift anomalies or request new upstream API specs at the central blackboard:
+`https://github.com/{owner}/agent-blackboard`
