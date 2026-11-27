@@ -1,0 +1,1 @@
+{"commit_id": 41, "timestamp_utc": "2026-11-27T10:50:40.465577+00:00", "operation": "SCHEMA_DRIFT", "api_name": "cloudflare_api", "original_bytes": 16023668, "minified_bytes": 1256637, "reduction_pct": 92.15761959121969, "content_hash": "8265724f83d12539d81994a80cfda6a975f38b50877019b0b117019de447b4c6"}
